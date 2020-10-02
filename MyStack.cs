@@ -8,6 +8,8 @@ using nwin = Pulumi.AzureNextGen.Network.Latest.Inputs;
 using lb = Pulumi.Azure.Lb;
 using Pulumi.AzureNextGen.Compute.Latest;
 using cpi = Pulumi.AzureNextGen.Compute.Latest.Inputs;
+using Pulumi.AzureNextGen.ServiceFabric.Latest;
+using sfi = Pulumi.AzureNextGen.ServiceFabric.Latest.Inputs;
 
 class MyStack : Stack
 {
@@ -135,6 +137,75 @@ class MyStack : Stack
             Protocol = "tcp",
         });
 
+        var sfCluster = new Cluster("thesf", new ClusterArgs{
+            ClusterName = "thesf",
+            ResourceGroupName = resourceGroup.Name,
+            Location = resourceGroup.Location,
+
+            AddOnFeatures = {
+                "DnsService",
+                "BackupRestoreService"
+            },
+            Certificate = new sfi.CertificateDescriptionArgs {
+                Thumbprint = "4426C164D9E66C2C813DEEC0486F235C0E933212",
+                X509StoreName = "My",
+            },
+            DiagnosticsStorageAccountConfig = new sfi.DiagnosticsStorageAccountConfigArgs {
+                BlobEndpoint = storageAccountLog.PrimaryEndpoints.Apply(it => it.Blob),
+                ProtectedAccountKeyName = "StorageAccountKey1",
+                QueueEndpoint = storageAccountLog.PrimaryEndpoints.Apply(it => it.Queue),
+                StorageAccountName = storageAccountLog.Name,
+                TableEndpoint = storageAccountLog.PrimaryEndpoints.Apply(it => it.Table),
+            },
+            FabricSettings = {
+                new sfi.SettingsSectionDescriptionArgs {
+                    Parameters = {
+                        new sfi.SettingsParameterDescriptionArgs {
+                            Name = "SecretEncryptionCertThumbprint",
+                            Value = "4426C164D9E66C2C813DEEC0486F235C0E933212",
+                        },
+                        new sfi.SettingsParameterDescriptionArgs {
+                            Name = "SecretEncryptionCertX509StoreName",
+                            Value = "My",
+                        },
+                    },
+                    Name = "BackupRestoreService",
+                },
+                new sfi.SettingsSectionDescriptionArgs {
+                    Parameters = {
+                        new sfi.SettingsParameterDescriptionArgs {
+                            Name = "ClusterProtectionLevel",
+                            Value = "EncryptAndSign",
+                        },
+                    },
+                    Name = "Security",
+                },
+            },
+            ManagementEndpoint = Output.Format($"https://{pubIpAddr.DnsSettings.Apply(it => it?.Fqdn)}:19080"),
+            NodeTypes = {
+                new sfi.NodeTypeDescriptionArgs {
+                    Name = "Type925",
+                    ApplicationPorts = new sfi.EndpointRangeDescriptionArgs {
+                        StartPort = 20000,
+                        EndPort = 30000,
+                    },
+                    ClientConnectionEndpointPort = 19000,
+                    DurabilityLevel = "Silver",
+                    EphemeralPorts = new sfi.EndpointRangeDescriptionArgs {
+                        StartPort = 49152,
+                        EndPort = 65534,
+                    },
+                    HttpGatewayEndpointPort = 19080,
+                    IsPrimary = true,
+                    VmInstanceCount = 5,
+                },
+            },
+            ReliabilityLevel = "Silver",
+            UpgradeMode = "Automatic",
+            VmImage = "Windows",
+        });
+
+
         Key1 = GetStorageKey(resourceGroup, storageAccountLog, 0);
         Key2 = GetStorageKey(resourceGroup, storageAccountLog, 1);
         Input<string> key1 = Key1;
@@ -159,8 +230,9 @@ class MyStack : Stack
                         new cpi.VirtualMachineScaleSetExtensionArgs {
                             Name = "Type925_ServiceFabricNode",
                             Type = "ServiceFabricNode",
+                            TypeHandlerVersion = "1.1",
                             AutoUpgradeMinorVersion = true,
-                            EnableAutomaticUpgrade = true,
+                            // EnableAutomaticUpgrade = true,   // MUST NOT ENABLED
                             ProtectedSettings = {
                                 { "StorageAccountKey1", key1 },
                                 { "StorageAccountKey2", key2 },
@@ -169,7 +241,8 @@ class MyStack : Stack
                             Settings = {
                                 // { "id", "thepulsf" },
                                 // { "clusterId", "thepulsf" },
-                                { "clusterEndpoint", pubIpAddr.DnsSettings.Apply(it => it?.Fqdn) },
+                                // { "clusterEndpoint", pubIpAddr.DnsSettings.Apply(it => it?.Fqdn) },
+                                { "clusterEndpoint", sfCluster.ClusterEndpoint },
                                 { "nodeTypeRef", "Type925" },
                                 { "dataPath", @"D:\\SvcFab" },
                                 { "durabilityLevel", "Silver" },
@@ -182,7 +255,65 @@ class MyStack : Stack
                                     } 
                                 },
                             },
-                            TypeHandlerVersion = "1.1",
+                        },
+                        new cpi.VirtualMachineScaleSetExtensionArgs {
+                            Name = "VMDiagnosticsVmExt_Set0",
+                            Type = "IaaSDiagnostics",
+                            TypeHandlerVersion = "1.5",
+                            ProtectedSettings = {
+                                { "storageAccountName", storageAccountAppDx.Name },
+                                { "storageAccountKey", GetStorageKey(resourceGroup, storageAccountAppDx, 0) },
+                                { "storageAccountEndPoint", "https://core.windows.net/" },
+                            },
+                            Publisher = "Microsoft.Azure.Diagnostics",
+                            Settings = {
+                                { "WadCfg", new InputMap<object>
+                                    {
+                                        { "DiagnosticMonitorConfiguration", new InputMap<object> 
+                                            {
+                                                { "overallQuotaInMB", "50000" },
+                                                { "EtwProviders", new InputMap<object>
+                                                    {
+                                                        { "EtwEventSourceProviderConfiguration", new InputList<InputMap<object>>
+                                                            {
+                                                                new InputMap<object> 
+                                                                {
+                                                                    { "provider", "Microsoft-ServiceFabric-Actors" },
+                                                                    { "scheduledTransferKeywordFilter", "1" },
+                                                                    { "scheduledTransferPeriod", "PT5M" },
+                                                                    { "DefaultEvents", new InputMap<string> 
+                                                                        { { "eventDestination", "ServiceFabricReliableActorEventTable" } } 
+                                                                    },
+                                                                },
+                                                                new InputMap<object> 
+                                                                {
+                                                                    { "provider", "Microsoft-ServiceFabric-Services" },
+                                                                    { "scheduledTransferPeriod", "PT5M" },
+                                                                    { "DefaultEvents", new InputMap<string> 
+                                                                        { { "eventDestination", "ServiceFabricReliableServiceEventTable" } } 
+                                                                    },
+                                                                },
+                                                            } 
+                                                        },
+                                                        { "EtwManifestProviderConfiguration", new InputList<InputMap<object>>
+                                                            {   new InputMap<object> {
+                                                                { "provider", "cbd93bc2-71e5-4566-b3a7-595d8eeca6e8" },
+                                                                { "scheduledTransferLogLevelFilter", "Information" },
+                                                                { "scheduledTransferKeywordFilter", "4611686018427387904" },
+                                                                { "scheduledTransferPeriod", "PT5M" },
+                                                                { "DefaultEvents", new InputMap<string> 
+                                                                    { { "eventDestination", "ServiceFabricSystemEventTable" } } 
+                                                                },
+                                                            } }
+                                                        },
+                                                    }
+                                                },
+                                            }
+                                        },
+                                    }
+                                },
+                                { "StorageAccount", storageAccountAppDx.Name },
+                            },
                         },
                     },
                 },
@@ -239,6 +370,102 @@ class MyStack : Stack
                 },
             },
         });
+
+        // var extensionOfServiceFabricNode = new VirtualMachineScaleSetExtension("Type925_ServiceFabricNode", new VirtualMachineScaleSetExtensionArgs{
+        //     Name = "Type925_ServiceFabricNode",
+        //     VmssExtensionName = "Type925_ServiceFabricNode",
+        //     VmScaleSetName = vmScaleSet.Name,
+        //     ResourceGroupName = resourceGroup.Name,
+        //     Type = "ServiceFabricNode",
+        //     TypeHandlerVersion = "1.1",
+        //     AutoUpgradeMinorVersion = true,
+        //     // EnableAutomaticUpgrade = true,   // MUST NOT ENABLED
+        //     ProtectedSettings = {
+        //         { "StorageAccountKey1", key1 },
+        //         { "StorageAccountKey2", key2 },
+        //     },
+        //     Publisher = "Microsoft.Azure.ServiceFabric",
+        //     Settings = {
+        //         // { "id", "thepulsf" },
+        //         // { "clusterId", "thepulsf" },
+        //         // { "clusterEndpoint", pubIpAddr.DnsSettings.Apply(it => it?.Fqdn) },
+        //         { "clusterEndpoint", sfCluster.ClusterEndpoint },
+        //         { "nodeTypeRef", "Type925" },
+        //         { "dataPath", @"D:\\SvcFab" },
+        //         { "durabilityLevel", "Silver" },
+        //         { "enableParallelJobs", true },
+        //         { "nicPrefixOverride", "10.10.10.0/24" },
+        //         { "certificate", new InputMap<string>
+        //             {
+        //                 { "thumbprint", "4426C164D9E66C2C813DEEC0486F235C0E933212" },
+        //                 { "x509StoreName", "My" },
+        //             } 
+        //         },
+        //     },
+        // });
+
+        // var extensionOfDxNodeSet0 = new VirtualMachineScaleSetExtension("VMDiagnosticsVmExt_Set0", new VirtualMachineScaleSetExtensionArgs{
+        //     Name = "VMDiagnosticsVmExt_Set0",
+        //     VmssExtensionName = "VMDiagnosticsVmExt_Set0",
+        //     VmScaleSetName = vmScaleSet.Name,
+        //     ResourceGroupName = resourceGroup.Name,
+        //     Type = "IaaSDiagnostics",
+        //     TypeHandlerVersion = "1.5",
+        //     ProtectedSettings = {
+        //         { "storageAccountName", storageAccountAppDx.Name },
+        //         { "storageAccountKey", GetStorageKey(resourceGroup, storageAccountAppDx, 0) },
+        //         { "storageAccountEndPoint", "https://core.windows.net/" },
+        //     },
+        //     Publisher = "Microsoft.Azure.Diagnostics",
+        //     Settings = {
+        //         { "WadCfg", new InputMap<object>
+        //             {
+        //                 { "DiagnosticMonitorConfiguration", new InputMap<object> 
+        //                     {
+        //                         { "overallQuotaInMB", "50000" },
+        //                         { "EtwProviders", new InputMap<object>
+        //                             {
+        //                                 { "EtwEventSourceProviderConfiguration", new InputList<InputMap<object>>
+        //                                     {
+        //                                         new InputMap<object> 
+        //                                         {
+        //                                             { "provider", "Microsoft-ServiceFabric-Actors" },
+        //                                             { "scheduledTransferKeywordFilter", "1" },
+        //                                             { "scheduledTransferPeriod", "PT5M" },
+        //                                             { "DefaultEvents", new InputMap<string> 
+        //                                                 { { "eventDestination", "ServiceFabricReliableActorEventTable" } } 
+        //                                             },
+        //                                         },
+        //                                         new InputMap<object> 
+        //                                         {
+        //                                             { "provider", "Microsoft-ServiceFabric-Services" },
+        //                                             { "scheduledTransferPeriod", "PT5M" },
+        //                                             { "DefaultEvents", new InputMap<string> 
+        //                                                 { { "eventDestination", "ServiceFabricReliableServiceEventTable" } } 
+        //                                             },
+        //                                         },
+        //                                     } 
+        //                                 },
+        //                                 { "EtwManifestProviderConfiguration", new InputList<InputMap<object>>
+        //                                     {   new InputMap<object> {
+        //                                         { "provider", "cbd93bc2-71e5-4566-b3a7-595d8eeca6e8" },
+        //                                         { "scheduledTransferLogLevelFilter", "Information" },
+        //                                         { "scheduledTransferKeywordFilter", "4611686018427387904" },
+        //                                         { "scheduledTransferPeriod", "PT5M" },
+        //                                         { "DefaultEvents", new InputMap<string> 
+        //                                             { { "eventDestination", "ServiceFabricSystemEventTable" } } 
+        //                                         },
+        //                                     } }
+        //                                 },
+        //                             }
+        //                         },
+        //                     }
+        //                 },
+        //             }
+        //         },
+        //         { "StorageAccount", storageAccountAppDx.Name },
+        //     },
+        // });
 
         // Export the primary key of> the Storage Account
         this.PrimaryStorageKey = Output.Tuple(resourceGroup.Name, storageAccountAppDx.Name).Apply(names =>
