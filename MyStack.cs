@@ -167,9 +167,9 @@ class MyStack : Stack
                             },
                             Publisher = "Microsoft.Azure.ServiceFabric",
                             Settings = {
-                                { "id", "thepulsf" },
-                                { "clusterId", "thepulsf" },
-                                { "clusterEndpoint", "thepulsf.southeastasia.cloudapp.azure.com" },
+                                // { "id", "thepulsf" },
+                                // { "clusterId", "thepulsf" },
+                                { "clusterEndpoint", pubIpAddr.DnsSettings.Apply(it => it?.Fqdn) },
                                 { "nodeTypeRef", "Type925" },
                                 { "dataPath", @"D:\\SvcFab" },
                                 { "durabilityLevel", "Silver" },
